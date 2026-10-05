@@ -87,7 +87,7 @@ function load() {
   } catch (err) {
     console.warn(`[store] 数据目录不可写（${err.code || err.message}）：本次以只读方式运行，改动不会持久化`);
   }
-  // 不用 existsSync 判断：在绑定挂载（群晖 / Docker Desktop / OrbStack）下
+  // 不用 existsSync 判断：在绑定挂载（NAS / Docker Desktop / OrbStack）下
   // stat 缓存与读取可能不一致，出现「存在但读不到」会让进程直接崩掉。
   // 一律以 readFileSync 的结果为准，读不到就当作首次启动。
   let raw;
@@ -178,7 +178,7 @@ function save(config) {
       console.error(
         `[store] 配置写入失败（${err.code || err.message}）：${FILE}\n` +
         '[store] 服务会继续运行，但改动不会持久化。请检查数据目录的挂载与属主' +
-        '（群晖示例：sudo chown -R 1000:1000 /volume1/docker/ticket-monitor/data）。',
+        '（NAS 示例：sudo chown -R 1000:1000 /volume1/docker/ticket-monitor/data）。',
       );
     }
     return false;

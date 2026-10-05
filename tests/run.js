@@ -1923,7 +1923,7 @@ const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'que
     delete require.cache[require.resolve('../src/dav')];
     const dav2 = require('../src/dav');
     assert.throws(() => dav2.normalizeBase('http://169.254.169.254/'), /元数据/);
-    // 开关打开后放行局域网（群晖 NAS 的真实场景）
+    // 开关打开后放行局域网（局域网 NAS 的真实场景）
     assert.strictEqual(dav2.normalizeBase('http://192.168.1.10:5005/dav/'), 'http://192.168.1.10:5005/dav');
     delete process.env.DAV_ALLOW_PRIVATE_NET;
     delete require.cache[require.resolve('../src/dav')];

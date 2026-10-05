@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 打包离线镜像：在能联网的电脑上导出 tar，拷到群晖后直接 docker load。
-# 群晖（尤其 DSM 7 的 Container Manager）在国内拉 Docker Hub 常常失败，这是推荐路径。
+# 打包离线镜像：在能联网的电脑上导出 tar，拷到 NAS 后直接 docker load。
+# NAS（尤其 DSM 7 的 Container Manager）在国内拉 Docker Hub 常常失败，这是推荐路径。
 set -euo pipefail
 
 TAG="${1:-ticket-monitor:1.0.0}"
@@ -18,9 +18,9 @@ echo "==> 导出到 ${OUT}"
 SIZE=$(du -h "$OUT" | cut -f1)
 echo "==> 完成：$(pwd)/${OUT} (${SIZE})"
 echo
-echo "群晖上执行："
-echo "  1) 把 ${OUT} 传到群晖，例如 /volume1/docker/"
-echo "  2) SSH 登录群晖后："
+echo "在 NAS 上执行："
+echo "  1) 把 ${OUT} 传到 NAS，例如 /volume1/docker/"
+echo "  2) SSH 登录 NAS 后："
 echo "       cd /volume1/docker"
 echo "       sudo docker load -i ${OUT}"
 echo "  3) 建数据目录并放行容器用户写权限（容器内 node 用户 uid=1000）："

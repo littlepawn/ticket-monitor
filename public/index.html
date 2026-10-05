@@ -113,7 +113,7 @@
         输入一次即记住（存在本机 localStorage），之后的请求都走请求头，令牌不会出现在地址栏、浏览器历史或反向代理的访问日志里。
       </div>
       <div class="sub warn-box">
-        <strong>不建议</strong>用 <code>?token=xxx</code> 这种方式访问：查询串会进入 Nginx / 群晖反代的访问日志、
+        <strong>不建议</strong>用 <code>?token=xxx</code> 这种方式访问：查询串会进入 Nginx / NAS 反代的访问日志、
         浏览器历史以及同页资源的 Referer，等于把令牌写进了多处日志。
       </div>
       <label class="field"><input type="password" id="s_token" placeholder="留空则不启用"></label>

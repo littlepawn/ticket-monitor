@@ -34,6 +34,6 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# 以 root 进入入口脚本：先修正挂载目录属主（群晖共享文件夹常见），再降权到 node
+# 以 root 进入入口脚本：先修正挂载目录属主（NAS 共享文件夹常见），再降权到 node
 ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["node", "src/server.js"]

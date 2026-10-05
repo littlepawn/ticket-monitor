@@ -45,7 +45,7 @@ function normalizeBase(url) {
   }
   // SSRF 防护：备份地址由用户填写却由服务端发起请求，默认拦住回环、
   // 链路本地与云元数据等内网目标。
-  // 但本项目的典型部署是群晖 NAS —— WebDAV 服务往往就在局域网里，
+  // 但本项目的典型部署是家用 NAS —— WebDAV 服务往往就在局域网里，
   // 一刀切会误杀真实场景，因此提供显式开关 DAV_ALLOW_PRIVATE_NET（默认关）。
   const host = (parsed.hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
   if (!host) throw new DavError('WebDAV 地址缺少主机名');
@@ -62,7 +62,7 @@ function normalizeBase(url) {
   }
   if (process.env.DAV_ALLOW_PRIVATE_NET === '1') return trimmed.replace(/\/+$/, '');
   if (blockedHost(host)) {
-    throw new DavError('不允许把内网地址作为 WebDAV 备份目标', { hint: '若备份目标确在局域网（如群晖 NAS），请设置环境变量 DAV_ALLOW_PRIVATE_NET=1' });
+    throw new DavError('不允许把内网地址作为 WebDAV 备份目标', { hint: '若备份目标确在局域网（如家用 NAS），请设置环境变量 DAV_ALLOW_PRIVATE_NET=1' });
   }
   return trimmed.replace(/\/+$/, '');
 }
