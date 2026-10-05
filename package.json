@@ -1,0 +1,16 @@
+{
+  "name": "ticket-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "12306 火车票余票监控（管理页面 + 多渠道路由推送；无登录、无 Cookie、不对抗风控）",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node tests/run.js",
+    "smoke": "node scripts/smoke.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

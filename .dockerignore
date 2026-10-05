@@ -1,0 +1,7 @@
+data
+node_modules
+tests
+scripts
+*.tar
+*.log
+.DS_Store

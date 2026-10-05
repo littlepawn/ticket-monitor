@@ -1,0 +1,26 @@
+services:
+  ticket-monitor:
+    build: .
+    # NAS 上没有现成镜像时可以先注释 build，用下面这行本地导入的镜像名
+    image: ticket-monitor:1.0.0
+    container_name: ticket-monitor
+    restart: unless-stopped
+    ports:
+      # 左边是宿主机端口，被占用就改成 8090/18080 等
+      - "8080:8080"
+    environment:
+      TZ: Asia/Shanghai
+      PORT: "8080"
+      DATA_DIR: /data
+      LOG_LEVEL: info
+      # 设为 false 时容器起来不自动开始轮询，进页面手动点「启动监控」
+      AUTO_START: "true"
+    volumes:
+      # 配置持久化，NAS 上建议映射到 docker/ticket-monitor 共享文件夹
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

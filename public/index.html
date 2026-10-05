@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>火车票余票监控</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚄</text></svg>">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="dot off" id="runDot"></span><span>火车票余票监控</span></div>
+  <span class="badge" id="runBadge">未启动</span>
+  <div class="spacer"></div>
+  <div class="meta">
+    <span id="nextRun">下次查询：--</span>
+    <span id="intervalInfo">间隔：--</span>
+    <span id="clock">--</span>
+  </div>
+  <button class="btn primary" id="toggleMonitor">启动监控</button>
+  <button class="btn" id="checkAll">立即检查</button>
+</header>
+
+<div class="wrap">
+  <div class="hint-tip" id="stationHint" style="display:none"></div>
+
+  <nav class="tabs">
+    <button data-tab="overview" class="active">总览</button>
+    <button data-tab="watches">监控任务</button>
+    <button data-tab="channels">推送渠道</button>
+    <button data-tab="events">事件与日志</button>
+    <button data-tab="settings">设置</button>
+  </nav>
+
+  <!-- 总览 -->
+  <section id="tab-overview">
+    <div class="panel">
+      <h2>运行状态</h2>
+      <div class="grid" id="stats"></div>
+    </div>
+    <div class="panel">
+      <h2>余票概览</h2>
+      <div class="sub">
+        按任务展示最近一次查询的席别情况。绿色实底＝有票，琥珀虚边＝可候补，灰色＝无票；席别以图标区分。
+      </div>
+      <div id="overviewWatches"></div>
+    </div>
+  </section>
+
+  <!-- 监控任务 -->
+  <section id="tab-watches" hidden>
+    <div class="panel">
+      <div class="row">
+        <h2 style="margin:0;flex:1">监控任务</h2>
+        <button class="btn primary" id="addWatch">+ 新增任务</button>
+      </div>
+      <div class="sub" style="margin-top:10px">无登录、无 Cookie，仅以低频请求查询官方公开余票接口，不进行任何抢票或风控对抗。「车次 / 出发时段 / 票价区间 / 历时」四个条件各自独立，可只用一个、可组合、也可全不用。</div>
+    </div>
+    <div id="watchList"></div>
+  </section>
+
+  <!-- 推送渠道 -->
+  <section id="tab-channels" hidden>
+    <div class="panel">
+      <div class="row">
+        <h2 style="margin:0;flex:1">推送渠道</h2>
+        <button class="btn primary" id="addChannel">+ 新增渠道</button>
+      </div>
+      <div class="sub" style="margin-top:10px">发现的余票会推送到所有已启用渠道；推送正文包含车次、时刻与席别余票。</div>
+    </div>
+    <div id="channelList"></div>
+  </section>
+
+  <!-- 事件 -->
+  <section id="tab-events" hidden>
+    <div class="panel">
+      <div class="row">
+        <h2 style="margin:0;flex:1">事件</h2>
+        <button class="btn" id="refreshEvents">刷新</button>
+      </div>
+      <div class="events" id="eventList"></div>
+    </div>
+    <div class="panel">
+      <h2>运行日志</h2>
+      <div class="logs" id="logList">加载中…</div>
+    </div>
+  </section>
+
+  <!-- 设置 -->
+  <section id="tab-settings" hidden>
+    <div class="panel">
+      <h2>查询节奏</h2>
+      <div class="sub">默认保守：900 秒一次 + 最多 120 秒随机抖动。低于 300 秒会显著增加被限流概率，不建议。</div>
+      <div class="grid">
+        <label class="field"><span>查询间隔（秒）</span><input type="number" id="s_interval" min="60" max="86400" step="30"></label>
+        <label class="field"><span>随机抖动上限（秒）</span><input type="number" id="s_jitter" min="0" max="3600" step="10"></label>
+        <label class="field"><span>最小间隔下限（秒）</span><input type="number" id="s_minInterval" min="60" max="86400" step="30"></label>
+        <label class="field"><span>命中后复查间隔（秒）</span><input type="number" id="s_retryOnHit" min="30" max="3600" step="10"></label>
+        <label class="field"><span>命中后快速复查时长（分钟）</span><input type="number" id="s_retryMax" min="1" max="1440" step="1"></label>
+      </div>
+      <h2 style="margin-top:6px">通知</h2>
+      <div class="row" style="margin-bottom:12px">
+        <label class="inline"><input type="checkbox" id="s_notifyOnHit"> 发现余票时推送</label>
+        <label class="inline"><input type="checkbox" id="s_notifyRecovery"> 余票消失时推送</label>
+        <label class="inline"><input type="checkbox" id="s_quietEnabled"> 静默时段</label>
+        <input type="time" id="s_quietStart" style="width:120px">
+        <span class="muted">至</span>
+        <input type="time" id="s_quietEnd" style="width:120px">
+      </div>
+      <h2>访问令牌（可选）</h2>
+      <div class="sub">
+        留空表示局域网内无需鉴权（仅建议在可信内网使用）。填写后，浏览器会提示输入访问令牌，
+        输入一次即记住（存在本机 localStorage），之后的请求都走请求头，令牌不会出现在地址栏、浏览器历史或反向代理的访问日志里。
+      </div>
+      <div class="sub warn-box">
+        <strong>不建议</strong>用 <code>?token=xxx</code> 这种方式访问：查询串会进入 Nginx / 群晖反代的访问日志、
+        浏览器历史以及同页资源的 Referer，等于把令牌写进了多处日志。
+      </div>
+      <label class="field"><input type="password" id="s_token" placeholder="留空则不启用"></label>
+      <div class="row">
+        <button class="btn primary" id="saveSettings">保存设置</button>
+        <span class="muted" id="settingsMsg"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>WebDAV 云端备份</h2>
+      <div class="sub">把配置备份到坚果云 / Nextcloud 等 WebDAV 服务。备份内容中的推送密钥与访问令牌一律掩码，<strong>不会把密钥上传到云端</strong>；恢复时自动用本地已存的密钥补回。</div>
+
+      <label class="inline" style="margin-bottom:12px">
+        <input type="checkbox" id="d_enabled"> 启用 WebDAV
+      </label>
+
+      <div class="grid" id="davFields">
+        <label class="field"><span>WebDAV 地址</span><input id="d_url" placeholder="https://dav.jianguoyun.com/dav/"></label>
+        <label class="field"><span>账号</span><input id="d_user" placeholder="邮箱或用户名"></label>
+        <label class="field"><span>密码 / 应用密码</span><input type="password" id="d_pass" placeholder="留空则不修改已保存的密码"></label>
+        <label class="field"><span>备份目录</span><input id="d_path" placeholder="ticket-monitor"></label>
+        <label class="field"><span>保留份数</span><input type="number" min="1" max="100" id="d_keep"></label>
+      </div>
+
+      <label class="inline" style="margin-bottom:12px">
+        <input type="checkbox" id="d_auto"> 配置变更后自动备份（1 分钟内合并为一次）
+      </label>
+
+      <div class="row">
+        <button class="btn" id="d_test">测试连接</button>
+        <button class="btn primary" id="d_backup">立即备份</button>
+        <button class="btn" id="d_list">查看云端备份</button>
+        <button class="btn" id="d_save">保存 WebDAV 设置</button>
+        <span class="muted" id="d_msg"></span>
+      </div>
+
+      <div id="d_result" style="margin-top:12px"></div>
+    </div>
+
+    <div class="panel">
+      <h2>配置导入 / 导出</h2>
+      <div class="sub">导出内容包含任务、渠道与设置；密钥与访问令牌一律掩码为 <code>******</code>，因此导出的文件不能用于还原密钥（如需跨机迁移密钥请手工补填）。</div>
+      <div class="row">
+        <button class="btn" id="exportConfig">导出 config.json</button>
+        <button class="btn" id="importConfig">从文件导入</button>
+        <input type="file" id="importFile" accept="application/json" style="display:none">
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>关于风控</h2>
+      <div class="muted" style="line-height:1.9">
+        本工具只做「查余票 + 推送」，不登录、不占座、不下单，因此没有可被封的账号。
+        仍可能遇到：官方接口返回 <code>429/403/412</code> 或响应缓慢。命中时程序会自动指数退避（最长 30 分钟）并记录事件，
+        不会持续冲击接口。若频繁出现，请调大查询间隔。
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
