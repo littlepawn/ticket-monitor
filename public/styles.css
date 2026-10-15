@@ -253,6 +253,8 @@ code { background: var(--panel-2); border: 1px solid var(--border); border-radiu
 
 /* 筛选把结果清空时的提示 */
 .warn-note { display: block; color: var(--warn); font-size: 12.5px; margin-top: 4px; }
+/* hidden 属性兜底：防止类选择器 display 覆盖导致隐藏元素仍占位显示 */
+[hidden] { display: none !important; }
 
 @media (max-width: 480px) {
   .filter-fields { flex-wrap: wrap; }
@@ -402,7 +404,28 @@ th.seat-col .seat-dot { margin-right: 5px; }
 /* 单元格：数值保持中性偏深；最低价单独右对齐 */
 .seat-cell { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .seat-cell .seat-status { display: inline-block; min-width: 16px; color: var(--text-dim); }
-.seat-cell.has .seat-status { color: var(--text); font-weight: 600; }
+.transfer-table .seat-cell.has .seat-status { color: var(--ok); font-weight: 600; }
+
+/* ---------- 中转结果表 ---------- */
+.transfer-table td, .transfer-table th { vertical-align: top; }
+.transfer-table tbody tr { transition: background .12s; }
+.transfer-table tbody tr:hover { background: var(--panel-2); }
+.transfer-table .wait-strong { color: var(--brand); font-weight: 600; font-variant-numeric: tabular-nums; }
+.transfer-table .price-col b { color: var(--text); font-variant-numeric: tabular-nums; font-size: 14px; }
+.transfer-table .seat-cell .code { margin-left: 4px; }
+.transfer-table tbody tr td { padding-top: 9px; padding-bottom: 9px; }
+.th-sort { background: none; border: none; color: inherit; font: inherit; cursor: pointer; padding: 0; }
+.th-sort:hover, .th-sort.on { color: var(--brand); }
+.seat-cell.combo .seat-status { color: var(--text-dim); }
+.seat-cell.combo .combo-price { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* 有票组合：绿色实底徽标风格（与监控页 .seat.has 一致） */
+.seat-cell.combo.has .seat-status { color: var(--ok); font-weight: 600; }
+.seat-cell.combo.has .combo-price { color: var(--ok); font-weight: 600; }
+.seat-cell.combo .seat-dot { margin-right: 1px; vertical-align: -1px; }
+.dim-badge { color: var(--text-dim); border-color: var(--border); background: var(--panel-2); }
+/* 最近条件复用 chips */
+.hist-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+.hist-chip:hover { color: var(--brand); border-color: var(--brand); }
 .seat-cell .seat-price { display: block; color: var(--text-dim); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .seat-cell.has .seat-price { color: var(--text-dim); }
 

@@ -9,6 +9,7 @@ const store = require('./store');
 const client = require('./client');
 const notifier = require('./notifier');
 const dav = require('./dav');
+const transfer = require('./transfer');
 const { Monitor } = require('./engine');
 
 const PORT = Number(process.env.PORT || 8080);
@@ -25,6 +26,8 @@ function fmtDay(d) {
 
 let config = store.load();
 const monitor = new Monitor({ getConfig: () => config });
+// 中转查询是手动按需操作，独立于轮询；节流闸门单独持有（30 秒下限写死在模块里）
+const transferService = new transfer.TransferService();
 
 const sseClients = new Set();
 const MAX_SSE_CLIENTS = Number(process.env.MAX_SSE_CLIENTS || 50);
@@ -662,6 +665,44 @@ const routes = [
       sendJson(res, 200, { ok: true, ...result });
     } catch (err) {
       sendJson(res, 200, { ok: false, error: err.message });
+    }
+  }],
+
+  // ---- 中转换乘（手动按需，不进轮询）----
+  ['GET', /^\/api\/transfer\/state$/, async (req, res) => {
+    sendJson(res, 200, transferService.status());
+  }],
+
+  ['POST', /^\/api\/transfer\/query$/, async (req, res) => {
+    const body = await readBody(req);
+    if (!monitor.stations && !(await monitor.loadStations())) {
+      return sendJson(res, 503, { error: monitor.stationError || '车站表未加载，无法解析站点' });
+    }
+    const { errors, query } = transfer.validateTransferQuery(body, {
+      resolveStation: (name) => client.resolveStation(name, monitor.stations),
+      now: new Date(),
+      presaleDays: PRESALE_DAYS,
+    });
+    if (errors.length) return sendJson(res, 400, { errors });
+
+    query.maxDate = fmtDay(new Date(Date.now() + PRESALE_DAYS * 86400000));
+    query.nameOf = (code) => (monitor.stations.find((s) => s.code === code) || {}).name || code;
+
+    try {
+      const result = await transferService.run(
+        JSON.stringify([query.date, query.fromCode, query.middleCode, query.toCode, query.minWait, query.maxWait, query.seats, query.onlyAvailable, query.exactStation, query.depFrom, query.arrTo]),
+        () => monitor.runExclusive(() => transfer.findTransfers(query), { source: 'transfer' }),
+      );
+      sendJson(res, 200, result);
+    } catch (err) {
+      // 上游限流/拒绝：追加冷却，避免持续冲接口
+      if (err.status === 429 || err.status === 403 || err.status === 412) {
+        transferService.penalty(err.status === 429 ? 120 : 300);
+      }
+      const status = err.code === 'RATE_LIMIT' ? 429
+        : err.code === 'BUSY' ? 503
+        : 502;
+      sendJson(res, status, { error: err.message, retryAfterSeconds: err.retryAfterSeconds });
     }
   }],
 

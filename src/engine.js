@@ -271,6 +271,29 @@ class Monitor {
     }
   }
 
+  // 通用互斥闸门：与 runOnce 共用 inFlight，让中转查询和轮询不会同时打上游。
+  // 排队等待最长 QUEUE_WAIT_MAX_MS，超时抛 BUSY。
+  async runExclusive(fn, { source = 'exclusive' } = {}) {
+    if (this.inFlight) {
+      logger.warn(`已有查询进行中，${source} 排队等待`);
+      const deadline = Date.now() + QUEUE_WAIT_MAX_MS;
+      while (this.inFlight) {
+        if (Date.now() > deadline) {
+          const err = new Error('已有查询长时间未结束，本次已取消以免请求堆积');
+          err.code = 'BUSY';
+          throw err;
+        }
+        await client.sleep(200);
+      }
+    }
+    this.inFlight = true;
+    try {
+      return await fn();
+    } finally {
+      this.inFlight = false;
+    }
+  }
+
   // 上一轮已完成的任务集合是否覆盖本次所需范围
   coversScope(need) {
     const scope = this.lastRunScope;

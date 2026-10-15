@@ -27,6 +27,7 @@
   <nav class="tabs">
     <button data-tab="overview" class="active">总览</button>
     <button data-tab="watches">监控任务</button>
+    <button data-tab="transfer">中转方案</button>
     <button data-tab="channels">推送渠道</button>
     <button data-tab="events">事件与日志</button>
     <button data-tab="settings">设置</button>
@@ -57,6 +58,73 @@
       <div class="sub" style="margin-top:10px">无登录、无 Cookie，仅以低频请求查询官方公开余票接口，不进行任何抢票或风控对抗。「车次 / 出发时段 / 票价区间 / 历时」四个条件各自独立，可只用一个、可组合、也可全不用。</div>
     </div>
     <div id="watchList"></div>
+  </section>
+
+  <!-- 中转方案 -->
+  <section id="tab-transfer" hidden>
+    <div class="panel">
+      <div class="row">
+        <h2 style="margin:0;flex:1">中转方案</h2>
+      </div>
+      <div class="sub" style="margin-top:10px">把「出发站→换乘站」与「换乘站→到达站」两段余票拼成可换乘组合；换乘必须同站，等待时间落在设定窗口内。为避免触发风控，每 30 秒只能查询一次。</div>
+      <div class="row" style="margin-top:12px;flex-wrap:wrap;gap:10px">
+        <div class="field" style="min-width:150px">
+          <label>乘车日期</label>
+          <div id="transferDate"></div>
+        </div>
+        <div class="field" style="min-width:150px">
+          <label>出发站</label>
+          <div id="transferFrom"></div>
+        </div>
+        <div class="field" style="min-width:150px">
+          <label>换乘站（中途）</label>
+          <div id="transferMiddle"></div>
+        </div>
+        <div class="field" style="min-width:150px">
+          <label>到达站</label>
+          <div id="transferTo"></div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px;flex-wrap:wrap;gap:10px;align-items:flex-end">
+        <div class="field" style="width:110px">
+          <label>最短换乘（分钟）</label>
+          <input id="transferMinWait" type="number" min="1" max="720" value="20">
+        </div>
+        <div class="field" style="width:110px">
+          <label>最长换乘（分钟）</label>
+          <input id="transferMaxWait" type="number" min="1" max="720" value="40">
+        </div>
+        <div class="field" style="flex:1;min-width:220px">
+          <label>席别（不选 = 任意）</label>
+          <div id="transferSeats" class="chip-row" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px;flex-wrap:wrap;gap:10px;align-items:flex-end">
+        <div class="field" style="width:140px">
+          <label>不早于（出发，可选）</label>
+          <input id="transferDepFrom" type="time">
+        </div>
+        <div class="field" style="width:140px">
+          <label>不晚于（到达，可选）</label>
+          <input id="transferArrTo" type="time">
+        </div>
+      </div>
+      <div id="transferHistoryWrap" class="sub" style="margin-top:10px" hidden>
+        <div style="margin-bottom:5px">最近条件（点击复用）：</div>
+        <div id="transferHistory" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+      </div>
+      <div class="row" style="margin-top:10px;align-items:center;flex-wrap:wrap;gap:10px">
+        <label class="inline"><input id="transferOnlyAvailable" type="checkbox"> 两程都有余票才列出</label>
+        <button class="btn" id="transferReset">重置</button>
+        <button class="btn primary" id="transferQuery">查询中转</button>
+        <span id="transferCountdown" class="sub"></span>
+      </div>
+      <div class="sub warn-note" id="transferNote" style="margin-top:8px" hidden></div>
+    </div>
+    <div class="panel scroll-x" style="margin-top:12px">
+      <div id="transferStats" class="sub" style="margin-bottom:8px"></div>
+      <div id="transferResults"></div>
+    </div>
   </section>
 
   <!-- 推送渠道 -->

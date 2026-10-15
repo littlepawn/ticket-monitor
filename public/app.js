@@ -56,7 +56,10 @@ async function api(path, options = {}) {
   try { data = text ? JSON.parse(text) : {}; } catch (e) { data = { error: text.slice(0, 200) }; }
   if (!res.ok) {
     const msg = data.errors ? data.errors.join('\n') : (data.error || `HTTP ${res.status}`);
-    throw new Error(msg);
+    const err = new Error(msg);
+    // 透传服务端附带的限流冷却秒数（中转查询 429 时用于启动倒计时）
+    if (data.retryAfterSeconds) err.retryAfterSeconds = data.retryAfterSeconds;
+    throw err;
   }
   return data;
 }
@@ -115,15 +118,26 @@ function todayPlus(days) {
 
 /* ---------- 标签页 ---------- */
 document.querySelectorAll('nav.tabs button').forEach((btn) => {
-  btn.addEventListener('click', () => {
+  btn.addEventListener('click', async () => {
     document.querySelectorAll('nav.tabs button').forEach((b) => b.classList.toggle('active', b === btn));
     activeTab = btn.dataset.tab;
-    ['overview', 'watches', 'channels', 'events', 'settings'].forEach((t) => {
+    ['overview', 'watches', 'transfer', 'channels', 'events', 'settings'].forEach((t) => {
       el('tab-' + t).hidden = t !== activeTab;
     });
     if (activeTab === 'settings' && config) fillSettings();
     // 切到事件页立即拉一次，否则要等 5 秒轮询才出内容
     if (activeTab === 'events') loadEvents();
+    if (activeTab === 'transfer') {
+      buildTransferForm();
+      renderTransferHistory();
+      try {
+        const st = await api('/api/transfer/state');
+        if (st.waitSeconds > 0) {
+          transferWaitUntil = Date.now() + st.waitSeconds * 1000;
+          startTransferCountdown();
+        }
+      } catch (err) { /* 状态拉不到就忽略，查询时服务端会拦 */ }
+    }
   });
 });
 
@@ -1064,12 +1078,13 @@ function closeStopsModal() {
 /* ---------- 任务弹窗 ---------- */
 let watchModal = null;
 
-function openWatchModal(id) {
+function openWatchModal(id, prefill) {
   const cfg = id ? config.watches.find((w) => w.id === id) : null;
+  const pf = prefill || {};
   const seats = config.meta.seatOptions;
   // 自研日期选择器实例（原生 input[type=date] 无法定制样式）
   let datePicker = null;
-  const selected = new Set(cfg ? cfg.seats : ['二等座', '一等座']);
+  const selected = new Set(cfg ? cfg.seats : (pf.seats || ['二等座', '一等座']));
   const wrap = document.createElement('div');
   wrap.className = 'modal-mask';
   wrap.innerHTML = `
@@ -1077,10 +1092,10 @@ function openWatchModal(id) {
       <h3>${cfg ? '编辑监控任务' : '新增监控任务'}</h3>
       <div id="wmErrors"></div>
       <label class="field"><span>出发站</span>
-        <div class="autocomplete"><input id="wmFrom" autocomplete="off" placeholder="如：上海 / 上海虹桥 / shanghai" value="${esc(cfg ? cfg.from : '')}"><ul hidden></ul></div>
+        <div class="autocomplete"><input id="wmFrom" autocomplete="off" placeholder="如：上海 / 上海虹桥 / shanghai" value="${esc(cfg ? cfg.from : (pf.from || ''))}"><ul hidden></ul></div>
       </label>
       <label class="field"><span>到达站</span>
-        <div class="autocomplete"><input id="wmTo" autocomplete="off" placeholder="如：北京 / 北京南" value="${esc(cfg ? cfg.to : '')}"><ul hidden></ul></div>
+        <div class="autocomplete"><input id="wmTo" autocomplete="off" placeholder="如：北京 / 北京南" value="${esc(cfg ? cfg.to : (pf.to || ''))}"><ul hidden></ul></div>
       </label>
       <div class="field"><span class="field-label">乘车日期</span>
         <div id="wmDateMount"></div>
@@ -1106,7 +1121,7 @@ function openWatchModal(id) {
         <div class="field-hint" id="wmExactHint"></div>
       </div>
       <label class="field"><span>车次（可选，逗号分隔，如 G2,G4；留空表示该区间所有车次）</span>
-        <input id="wmTrains" placeholder="G2,G4" value="${esc(cfg && cfg.trains ? cfg.trains.join(',') : '')}">
+        <input id="wmTrains" placeholder="G2,G4" value="${esc(cfg && cfg.trains ? cfg.trains.join(',') : (pf.trains ? pf.trains.join(',') : ''))}">
       </label>
       <div class="filter-box" id="wmFilters">
         <div class="filter-head">
@@ -1258,7 +1273,7 @@ function openWatchModal(id) {
   setupAutocomplete(wrap.querySelector('#wmFrom').parentElement);
   setupAutocomplete(wrap.querySelector('#wmTo').parentElement);
   datePicker = createDatePicker(wrap.querySelector('#wmDateMount'), {
-    initial: cfg ? cfg.date : todayPlus(1),
+    initial: cfg ? cfg.date : (pf.date || todayPlus(1)),
     minIso: todayPlus(0),
     maxIso: todayPlus(PRESALE_DAYS_UI),
   });
@@ -1331,6 +1346,307 @@ function setupAutocomplete(container) {
 }
 
 el('addWatch').addEventListener('click', () => openWatchModal(null));
+
+/* ---------- 中转方案 ---------- */
+let transferDatePicker = null;
+let transferCountdownTimer = null;
+let transferWaitUntil = 0;
+let transferSeatChipsBuilt = false;
+let transferStationInputsBuilt = false;
+let transferAutocompleteBound = false;
+const transferSelectedSeats = new Set();
+let transferSortKey = 'wait';   // 结果排序：wait | duration | price
+let transferLastResult = null;  // 保留最近一次结果，点表头本地重排不重查
+
+function buildTransferForm() {
+  if (!config) return;
+  if (!transferDatePicker) {
+    transferDatePicker = createDatePicker(el('transferDate'), { initial: todayPlus(1), minIso: todayPlus(0), maxIso: todayPlus(14) });
+  }
+  if (!transferSeatChipsBuilt) {
+    transferSeatChipsBuilt = true;
+    const box = el('transferSeats');
+    box.innerHTML = config.meta.seatOptions.map((s) =>
+      `<button type="button" class="chip" data-seat="${esc(s)}">${esc(s)}</button>`).join('');
+    box.querySelectorAll('.chip').forEach((chip) => chip.addEventListener('click', () => {
+      const s = chip.dataset.seat;
+      if (transferSelectedSeats.has(s)) { transferSelectedSeats.delete(s); chip.classList.remove('on'); }
+      else { transferSelectedSeats.add(s); chip.classList.add('on'); }
+    }));
+  }
+  if (!transferStationInputsBuilt) {
+    transferStationInputsBuilt = true;
+    ['transferFrom', 'transferMiddle', 'transferTo'].forEach((id) => {
+      const c = el(id);
+      c.classList.add('autocomplete');
+      c.innerHTML = `<input autocomplete="off" placeholder="如：${id === 'transferFrom' ? '北京南' : id === 'transferMiddle' ? '济南西' : '上海虹桥'}"><ul hidden></ul>`;
+    });
+  }
+  if (!transferAutocompleteBound) {
+    transferAutocompleteBound = true;
+    setupAutocomplete(el('transferFrom'));
+    setupAutocomplete(el('transferMiddle'));
+    setupAutocomplete(el('transferTo'));
+  }
+}
+
+function fmtWait(minutes) {
+  const n = Number(minutes);
+  if (!Number.isFinite(n)) return '';
+  if (n < 60) return `${n} 分钟`;
+  return `${Math.floor(n / 60)} 小时 ${n % 60 ? n % 60 + ' 分' : ''}`.trim();
+}
+
+function renderTransfer(result) {
+  const q = result.query;
+  const st = result.stats;
+  const note = el('transferNote');
+  if (st.nextDayNote) { note.textContent = st.nextDayNote; note.hidden = false; }
+  else note.hidden = true;
+
+  el('transferStats').textContent =
+    `第一程 ${st.leg1Kept}/${st.leg1Total} 班、第二程 ${st.leg2Kept}/${st.leg2Total} 班可用` +
+    `（跨午夜加查次日：${st.nextDayQueried ? '是' : '否'}），` +
+    `共 ${st.matched} 个组合满足 ${q.minWait}–${q.maxWait} 分钟换乘` +
+    (st.sameTrainSkipped ? `，已跳过 ${st.sameTrainSkipped} 个同车次停靠` : '') +
+    `，上游请求 ${st.requests} 次` +
+    (result.cached ? `；本次为 ${result.retryAfterSeconds}s 冷却内的缓存结果` : '');
+
+  const box = el('transferResults');
+  if (!result.items.length) {
+    box.innerHTML = `<div class="empty">没有满足条件的组合。可放宽换乘时间窗口、或改用模糊站名匹配。</div>`;
+    return;
+  }
+  // 席别组合价格：labels = 勾选席别（未勾选则回退该车两程并集价格席别）。
+  // 每行生成「第一程席别+第二程席别 合计」列表，按合计升序，两程都有票的组合优先。
+  const minPrice = (pool) => {
+    let min = null;
+    for (const k in (pool || {})) if (typeof pool[k] === 'number' && pool[k] > 0 && (min === null || pool[k] < min)) min = pool[k];
+    return min;
+  };
+  const comboLabels = q.seats && q.seats.length ? q.seats : null;
+  const priceSumOf = (it) => {
+    const labels = comboLabels || Array.from(new Set([...Object.keys(it.leg1.prices || {}), ...Object.keys(it.leg2.prices || {})]));
+    const a = labels.some((l) => typeof (it.leg1.prices || {})[l] === 'number') ? minPrice(pickLabels(it.leg1.prices, labels)) : minPrice(it.leg1.prices);
+    const b = labels.some((l) => typeof (it.leg2.prices || {})[l] === 'number') ? minPrice(pickLabels(it.leg2.prices, labels)) : minPrice(it.leg2.prices);
+    return a != null && b != null ? a + b : null;
+  };
+  const pickLabels = (pool, labels) => {
+    const f = {};
+    for (const l of labels) if (typeof (pool || {})[l] === 'number') f[l] = pool[l];
+    return f;
+  };
+  const combosOf = (it) => {
+    const labels = comboLabels;
+    if (!labels) return [];   // 未勾选席别时保持原余票展示
+    const out = [];
+    for (const la of labels) {
+      for (const lb of labels) {
+        const pa = (it.leg1.prices || {})[la], pb = (it.leg2.prices || {})[lb];
+        if (typeof pa !== 'number' || typeof pb !== 'number') continue;
+        const ok = it.leg1.hits[la] !== undefined && it.leg2.hits[lb] !== undefined;
+        out.push({ la, lb, sum: pa + pb, ok });
+      }
+    }
+    out.sort((x, y) => x.sum - y.sum || (y.ok ? 1 : 0) - (x.ok ? 1 : 0));
+    return out;
+  };
+  const sortKey = transferSortKey || 'wait';
+  const durMinOf = (s) => {
+    const m = String(s || '').match(/(\d+):(\d+)/);
+    return m ? Number(m[1]) * 60 + Number(m[2]) : Infinity;
+  };
+  const filtered = result.items;   // 时间段过滤已由服务端完成，客户端不重复
+  const sorted = filtered.slice().sort((a, b) => {
+    if (sortKey === 'price') {
+      const pa = priceSumOf(a), pb = priceSumOf(b);
+      if (pa !== null && pb !== null && pa !== pb) return pa - pb;
+      if (pa !== null && pb === null) return -1;
+      if (pa === null && pb !== null) return 1;   // 有价的排无价前面，等价落到等待时间排序
+    }
+    if (sortKey === 'duration') {
+      const da = durMinOf(fmtDurationInput(a.totalMinutes)), db = durMinOf(fmtDurationInput(b.totalMinutes));
+      if (da !== db) return da - db;
+    }
+    return a.waitMinutes - b.waitMinutes;   // 默认：换乘等待
+  });
+  box.innerHTML = `<table class="scroll-x transfer-table"><thead><tr>
+      <th>车次</th><th>第一程</th><th><button type="button" class="th-sort${sortKey === 'wait' ? ' on' : ''}" data-sort="wait">换乘等待${sortKey === 'wait' ? ' ↓' : ''}</button></th><th>第二程</th><th><button type="button" class="th-sort${sortKey === 'duration' ? ' on' : ''}" data-sort="duration">全程历时${sortKey === 'duration' ? ' ↓' : ''}</button></th><th><button type="button" class="th-sort${sortKey === 'price' ? ' on' : ''}" data-sort="price">最低价格${sortKey === 'price' ? ' ↓' : ''}</button></th><th>余票</th>
+    </tr></thead><tbody>` +
+    sorted.map((it) => {
+      const combos = combosOf(it);
+      // 勾选席别时：余票列直接展示「席别组合 合计」；未勾选时保持逐席别展示
+      const ticketsHtml = combos.length
+        ? combos.map((c) =>
+            // 与监控任务页同风格：席别色点 + 状态色徽标（有票绿实心 / 缺票灰空心）
+            `<span class="seat-cell combo${c.ok ? ' has' : ''}">${seatDot(c.la, true)}${seatDot(c.lb, true)} <span class="seat-status">${esc(c.la)}+${esc(c.lb)}</span> <b class="combo-price">¥${c.sum.toFixed(1)}</b>${c.ok ? '' : ` <button type="button" class="btn tiny watch-add" data-leg="1" data-seat="${esc(c.la)}" title="监控第一程 ${esc(it.leg1.trainCode)} ${esc(c.la)}，有票时推送">+监控</button>`}</span>`
+          ).join('<br>')
+        : (() => {
+            const seatsText = (seats, prices) => Object.entries(seats).map(([k, v]) => {
+              const p = typeof (prices || {})[k] === 'number' ? ` <span class="code">¥${(prices[k]).toFixed(1)}</span>` : '';
+              return `<span class="seat-cell${v === '有' ? ' has' : ''}"><span class="seat-status">${esc(k)} ${esc(v)}</span>${p}</span>`;
+            }).join(' ');
+            return seatsText(it.leg1.hits, it.leg1.prices) +
+              (Object.keys(it.leg1.hits).length && Object.keys(it.leg2.hits).length ? '<br>' : '') +
+              seatsText(it.leg2.hits, it.leg2.prices);
+          })();
+      const priceSum = priceSumOf(it);
+      const waitBadge = it.nextDayBoarding ? ' <span class="badge">次日乘车</span>' : '';
+      const warn = it.waitUncertain ? ' <span class="badge" title="该车历时缺失，等待时间按启发式推算，可能不准">?</span>' : '';
+      return `<tr>
+        <td class="code">${esc(it.leg1.trainCode)} → ${esc(it.leg2.trainCode)}</td>
+        <td>${esc(it.leg1.fromName)} ${esc(it.leg1.startTime)} → ${esc(it.leg1.toName)} ${esc(it.leg1.arriveTime)}${it.leg1.nextDayArrival ? '<span class="code">+1天</span>' : ''}</td>
+        <td><span class="wait-strong">${fmtWait(it.waitMinutes)}</span>${waitBadge}${warn}</td>
+        <td>${esc(it.leg2.fromName)} ${esc(it.leg2.startTime)} → ${esc(it.leg2.toName)} ${esc(it.leg2.arriveTime)}${it.leg2.nextDayArrival ? '<span class="code">+1天</span>' : ''}</td>
+        <td>${esc(fmtDurationInput(it.totalMinutes))}</td>
+        <td class="price-col">${priceSum !== null ? `<b>¥${priceSum.toFixed(1)}</b>` : '<span class="code">--</span>'}</td>
+        <td>${ticketsHtml}</td>
+      </tr>`;
+    }).join('') + '</tbody></table>';
+  if (!filtered.length && result.items.length) {
+    box.insertAdjacentHTML('afterbegin', `<div class="empty">共 ${result.items.length} 个组合，但都不在所选时间段内。可清空时间段再查。</div>`);
+  }
+  transferLastResult = result;
+  box.querySelectorAll('.th-sort').forEach((btn) => btn.addEventListener('click', () => {
+    transferSortKey = btn.dataset.sort;
+    if (transferLastResult) renderTransfer(transferLastResult);   // 本地重排，不重新请求
+  }));
+  // 缺票组合一键加入监控：预填监控弹窗（第一程区间 + 该席别 + 车次限定）
+  box.querySelectorAll('.watch-add').forEach((btn) => btn.addEventListener('click', (e) => {
+    const row = btn.closest('tr');
+    const codes = row.querySelector('td.code').textContent.split('→').map((s) => s.trim());
+    const seat = btn.dataset.seat;
+    openWatchModal(null, {
+      from: transferLastResult.query.fromName,
+      to: transferLastResult.query.middleName,
+      date: transferLastResult.query.date,
+      trains: [codes[0]],
+      seats: [seat],
+    });
+    e.stopPropagation();
+  }));
+}
+
+function startTransferCountdown() {
+  clearInterval(transferCountdownTimer);
+  transferCountdownTimer = setInterval(() => {
+    const remain = Math.ceil((transferWaitUntil - Date.now()) / 1000);
+    el('transferCountdown').textContent = remain > 0 ? `冷却中，${remain}s 后可再次查询` : '';
+    if (remain <= 0) clearInterval(transferCountdownTimer);
+  }, 500);
+}
+
+el('transferQuery').addEventListener('click', async () => {
+  const btn = el('transferQuery');
+  // 表单未构建（config 未加载）时站输入框不存在，直接提示而不是抛 TypeError
+  if (!el('transferFrom').querySelector('input')) { toast('页面配置尚未加载，请稍后重试', 'err'); return; }
+  const body = {
+    date: transferDatePicker ? transferDatePicker.value : todayPlus(1),
+    from: el('transferFrom').querySelector('input').value.trim(),
+    middle: el('transferMiddle').querySelector('input').value.trim(),
+    to: el('transferTo').querySelector('input').value.trim(),
+    minWait: Number(el('transferMinWait').value) || 20,
+    maxWait: Number(el('transferMaxWait').value) || 40,
+    seats: Array.from(transferSelectedSeats),
+    onlyAvailable: el('transferOnlyAvailable').checked,
+    depFrom: el('transferDepFrom').value || null,
+    arrTo: el('transferArrTo').value || null,
+  };
+  btn.disabled = true;
+  btn.textContent = '查询中…';
+  try {
+    const result = await api('/api/transfer/query', { method: 'POST', body: JSON.stringify(body) });
+    renderTransfer(result);
+    saveTransferHistory(body);
+    transferWaitUntil = Date.now() + (result.retryAfterSeconds ? result.retryAfterSeconds * 1000 : 30000);
+    startTransferCountdown();
+    toast(result.cached ? '命中缓存（冷却窗口内重复查询）' : '查询完成', 'ok');
+  } catch (err) {
+    toast(err.message, 'err');
+    if (err.retryAfterSeconds) {
+      transferWaitUntil = Date.now() + err.retryAfterSeconds * 1000;
+      startTransferCountdown();
+    }
+  }
+  btn.disabled = false;
+  btn.textContent = '查询中转';
+});
+
+// 倒计时跨刷新：进入中转页时拉一次服务端冷却状态
+el('transferQuery').dataset.ready = '1';
+
+/* ---------- 中转：重置与历史条件 ---------- */
+const TRANSFER_HISTORY_KEY = 'transferHistoryV1';
+let transferHistoryLoaded = false;
+
+function transferHistoryLoad() {
+  try { return JSON.parse(localStorage.getItem(TRANSFER_HISTORY_KEY)) || []; }
+  catch { return []; }
+}
+
+function saveTransferHistory(body) {
+  // 去重：与最近一条完全相同则不重复记录
+  const list = transferHistoryLoad().filter((h) => JSON.stringify(h) !== JSON.stringify(body));
+  list.unshift(body);
+  try { localStorage.setItem(TRANSFER_HISTORY_KEY, JSON.stringify(list.slice(0, 3))); } catch (e) { /* 私密模式/配额满时忽略 */ }
+  renderTransferHistory();
+}
+
+function transferCondText(h) {
+  const parts = [`${h.from || '?'} → ${h.middle || '?'} → ${h.to || '?'}`, h.date];
+  if (h.depFrom) parts.push(`出发≥${h.depFrom}`);
+  if (h.arrTo) parts.push(`到达≤${h.arrTo}`);
+  if (h.seats && h.seats.length) parts.push(h.seats.join('/'));
+  if (h.onlyAvailable) parts.push('两程都有票');
+  return parts.join(' · ');
+}
+
+function renderTransferHistory() {
+  const list = transferHistoryLoad();
+  const wrap = el('transferHistoryWrap');
+  const box = el('transferHistory');
+  wrap.hidden = !list.length;   // 无历史时整块隐藏，不留空占位
+  box.innerHTML = list
+    .map((h, i) => `<button type="button" class="chip hist-chip" data-hist="${i}" title="${esc(transferCondText(h))}">${esc(transferCondText(h))}</button>`).join('');
+  box.querySelectorAll('[data-hist]').forEach((chip) => chip.addEventListener('click', () => {
+    applyTransferHistory(transferHistoryLoad()[Number(chip.dataset.hist)]);
+  }));
+  transferHistoryLoaded = true;
+}
+
+function applyTransferHistory(h) {
+  if (!h) return;
+  if (transferDatePicker && h.date) transferDatePicker.value = h.date;
+  const setStation = (id, name) => { const c = el(id); if (c && name) c.querySelector('input').value = name; };
+  setStation('transferFrom', h.from);
+  setStation('transferMiddle', h.middle);
+  setStation('transferTo', h.to);
+  el('transferMinWait').value = h.minWait ?? 20;
+  el('transferMaxWait').value = h.maxWait ?? 40;
+  transferSelectedSeats.clear();
+  document.querySelectorAll('#transferSeats .chip').forEach((c) => c.classList.toggle('on', (h.seats || []).includes(c.dataset.seat)));
+  (h.seats || []).forEach((s) => transferSelectedSeats.add(s));
+  el('transferOnlyAvailable').checked = Boolean(h.onlyAvailable);
+  el('transferDepFrom').value = h.depFrom || '';
+  el('transferArrTo').value = h.arrTo || '';
+  toast('已填入历史条件，点「查询中转」执行', 'ok');
+}
+
+el('transferReset').addEventListener('click', () => {
+  if (transferDatePicker) transferDatePicker.value = todayPlus(1);
+  ['transferFrom', 'transferMiddle', 'transferTo'].forEach((id) => { const c = el(id); const i = c.querySelector('input'); if (i) i.value = ''; });
+  el('transferMinWait').value = 20;
+  el('transferMaxWait').value = 40;
+  transferSelectedSeats.clear();
+  document.querySelectorAll('#transferSeats .chip').forEach((c) => c.classList.remove('on'));
+  el('transferOnlyAvailable').checked = false;
+  el('transferDepFrom').value = '';
+  el('transferArrTo').value = '';
+  el('transferResults').innerHTML = '';
+  el('transferStats').textContent = '';
+  toast('已重置', 'ok');
+});
+
 
 /* ---------- 渠道弹窗 ---------- */
 function openChannelModal(id) {

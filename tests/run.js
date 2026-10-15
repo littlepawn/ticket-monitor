@@ -2706,6 +2706,206 @@ const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'que
     assert.ok(js.includes('history.replaceState'), '地址栏里的令牌应被抹掉');
   });
 
+  console.log('\n[transfer] 中转换乘');
+
+  await test('中转时刻推算：天偏移与两段求交', () => {
+    const transfer = require('../src/transfer');
+    // 06:18 发 01:41 历时 07:59 到 → 无跨天
+    assert.strictEqual(transfer.dayOffsetOf({ startTime: '06:18', arriveTime: '07:59', duration: '01:41' }).days, 0);
+    // 23:50 发 00:20 到 → 跨天
+    assert.strictEqual(transfer.dayOffsetOf({ startTime: '23:50', arriveTime: '00:20', duration: '00:30' }).days, 1);
+    // 历时缺失时退回启发式（到达早于发车即跨天）
+    const guess = transfer.dayOffsetOf({ startTime: '23:50', arriveTime: '00:20', duration: null });
+    assert.strictEqual(guess.days, 1);
+    assert.strictEqual(guess.known, false);
+
+    const mk = (code, trainNo, dep, arr, dur, tickets) => ({
+      trainCode: code, trainNo, startTime: dep, arriveTime: arr, duration: dur,
+      fromCode: 'VNP', toCode: 'JGK', tickets: tickets || {},
+    });
+    // legA：G1 08:00→10:00 到达；legB：G2 10:20→12:00 发车（等待 20，闭区间命中）
+    const legA = transfer.legEntries([mk('G1', 't1', '08:00', '10:00', '02:00')], 0);
+    const legB = transfer.legEntries([mk('G2', 't2', '10:20', '12:00', '01:40')], 0);
+    const r = transfer.matchTransfers(legA, legB, { minWait: 20, maxWait: 40 });
+    assert.strictEqual(r.items.length, 1);
+    assert.strictEqual(r.items[0].waitMinutes, 20);
+    // 边界：19 分钟不命中、40 分钟命中、41 分钟不命中
+    const b19 = transfer.legEntries([mk('G2', 't2', '10:19', '12:00', '01:41')], 0);
+    const b40 = transfer.legEntries([mk('G2', 't2', '10:40', '12:20', '01:40')], 0);
+    const b41 = transfer.legEntries([mk('G2', 't2', '10:41', '12:21', '01:40')], 0);
+    assert.strictEqual(transfer.matchTransfers(legA, b19, { minWait: 20, maxWait: 40 }).items.length, 0);
+    assert.strictEqual(transfer.matchTransfers(legA, b40, { minWait: 20, maxWait: 40 }).items.length, 1, '40 分钟闭区间命中');
+    assert.strictEqual(transfer.matchTransfers(legA, b41, { minWait: 20, maxWait: 40 }).items.length, 0);
+    // 同 trainNo 是同车停靠，不算换乘
+    const same = transfer.legEntries([mk('G1', 't1', '10:30', '12:00', '01:30')], 0);
+    const rs = transfer.matchTransfers(legA, same, { minWait: 20, maxWait: 40 });
+    assert.strictEqual(rs.items.length, 0);
+    assert.strictEqual(rs.sameTrainSkipped, 1);
+    // 跨午夜：legA 23:50 到（跨天 1），legB 次日(dayBase=1) 00:20 发 → 等待 30 分钟
+    const nightA = transfer.legEntries([mk('N1', 'tn1', '22:00', '23:50', '01:50')], 0);
+    const nextB = transfer.legEntries([mk('N2', 'tn2', '00:20', '06:00', '05:40')], 1);
+    const rn = transfer.matchTransfers(nightA, nextB, { minWait: 20, maxWait: 40 });
+    assert.strictEqual(rn.items.length, 1);
+    assert.strictEqual(rn.items[0].waitMinutes, 30);
+    assert.strictEqual(rn.items[0].nextDayBoarding, true);
+    // 席别过滤：onlyAvailable 要求两程都有命中席别
+    const seatsNo = transfer.matchTransfers(legA, legB, { minWait: 20, maxWait: 40, seats: ['商务座'], onlyAvailable: true });
+    assert.strictEqual(seatsNo.items.length, 0, '两程都无商务座应被过滤');
+  });
+
+  await test('中转入参校验：日期、站点、窗口、席别', () => {
+    const transfer = require('../src/transfer');
+    const stations = [
+      { name: '北京南', code: 'VNP', pinyin: 'beijingnan', short: 'bjn', abbr: 'bjn', city: '北京' },
+      { name: '济南西', code: 'JGK', pinyin: 'jinanxi', short: 'jnx', abbr: 'jnx', city: '济南' },
+      { name: '上海虹桥', code: 'AOH', pinyin: 'shanghaihongqiao', short: 'shhq', abbr: 'shhq', city: '上海' },
+    ];
+    const opts = { resolveStation: (n) => client.resolveStation(n, stations), now: new Date('2026-10-15T12:00:00') };
+    const ok = transfer.validateTransferQuery({ date: '2026-10-20', from: '北京南', middle: '济南西', to: '上海虹桥' }, opts);
+    assert.deepStrictEqual(ok.errors, []);
+    assert.strictEqual(ok.query.minWait, 20, '默认窗口 20');
+    assert.strictEqual(ok.query.maxWait, 40, '默认窗口 40');
+    const bad = transfer.validateTransferQuery({ date: '2026-10-10', from: '北京南', middle: '济南西', to: '上海虹桥', minWait: 40, maxWait: 20 }, opts);
+    assert.ok(bad.errors.some((e) => e.includes('过去')), '过去日期应报错');
+    assert.ok(bad.errors.some((e) => e.includes('不能大于')), 'min>max 应报错');
+    const beyond = transfer.validateTransferQuery({ date: '2026-11-14', from: '北京南', middle: '济南西', to: '上海虹桥' }, opts);
+    assert.ok(beyond.errors.some((e) => e.includes('预售期')), '超出预售期应报错');
+    const same = transfer.validateTransferQuery({ date: '2026-10-20', from: '北京南', middle: '北京南', to: '上海虹桥' }, opts);
+    assert.ok(same.errors.some((e) => e.includes('相同')), '换乘站=出发站应报错');
+    const unknownSeat = transfer.validateTransferQuery({ date: '2026-10-20', from: '北京南', middle: '济南西', to: '上海虹桥', seats: ['豪华座'] }, opts);
+    assert.ok(unknownSeat.errors.some((e) => e.includes('未知席别')));
+  });
+
+  await test('中转编排：恰好 2 次上游请求、跨午夜才加查次日、日期字段正确', async () => {
+    const transfer = require('../src/transfer');
+    const mk = (code, trainNo, dep, arr, dur, fromCode = 'VNP', toCode = 'JGK') => ({
+      trainCode: code, trainNo, startTime: dep, arriveTime: arr, duration: dur,
+      fromCode, toCode, tickets: { 二等座: '有' }, prices: {},
+    });
+    const calls = [];
+    const original = client.queryTickets;
+    client.queryTickets = async ({ date }) => {
+      calls.push(date);
+      if (calls.length === 1) return { trains: [mk('G1', 't1', '08:00', '10:00', '02:00')], stationMap: {}, checkedAt: Date.now() };
+      if (calls.length === 2) return { trains: [mk('G2', 't2', '10:30', '12:00', '01:30', 'JGK', 'AOH')], stationMap: {}, checkedAt: Date.now() };
+      throw new Error('不应有第三次请求');
+    };
+    try {
+      const r = await transfer.findTransfers({
+        date: '2026-10-20', fromCode: 'VNP', middleCode: 'JGK', toCode: 'AOH',
+        minWait: 20, maxWait: 40, seats: [], onlyAvailable: false, nameOf: (c) => c, maxDate: '2026-10-29',
+      });
+      assert.strictEqual(calls.length, 2, `常规情形应恰好 2 次请求，实际 ${calls.length}`);
+      assert.strictEqual(r.stats.nextDayQueried, false);
+      assert.strictEqual(r.items.length, 1);
+      assert.strictEqual(r.items[0].leg1.boardingDate, '2026-10-20');
+      assert.strictEqual(r.items[0].leg2.boardingDate, '2026-10-20');
+    } finally { client.queryTickets = original; }
+
+    // 跨午夜：第一程 23:50 到 → 必须加查次日
+    calls.length = 0;
+    client.queryTickets = async ({ date }) => {
+      calls.push(date);
+      if (date === '2026-10-20' && calls.filter((d) => d === '2026-10-20').length === 1) {
+        return { trains: [mk('N1', 'tn1', '22:00', '23:50', '01:50')], stationMap: {}, checkedAt: Date.now() };
+      }
+      if (date === '2026-10-20') return { trains: [], stationMap: {}, checkedAt: Date.now() };
+      return { trains: [mk('N2', 'tn2', '00:20', '06:00', '05:40', 'JGK', 'AOH')], stationMap: {}, checkedAt: Date.now() };
+    };
+    try {
+      const r2 = await transfer.findTransfers({
+        date: '2026-10-20', fromCode: 'VNP', middleCode: 'JGK', toCode: 'AOH',
+        minWait: 20, maxWait: 40, seats: [], onlyAvailable: false, nameOf: (c) => c, maxDate: '2026-10-29',
+      });
+      assert.strictEqual(calls.length, 3, `跨午夜应加查次日，实际 ${calls.length}`);
+      assert.strictEqual(calls[2], '2026-10-21');
+      assert.strictEqual(r2.stats.nextDayQueried, true);
+      assert.strictEqual(r2.items.length, 1);
+      assert.strictEqual(r2.items[0].leg2.boardingDate, '2026-10-21', '跨午夜第二程乘车日应为次日');
+      assert.strictEqual(r2.items[0].nextDayBoarding, true);
+    } finally { client.queryTickets = original; }
+  });
+
+  await test('中转节流：30 秒下限、同参数回缓存、异参数拒绝、上限不可调低', async () => {
+    const transfer = require('../src/transfer');
+    let now = 1_000_000;
+    let calls = 0;
+    const svc = new transfer.TransferService({ minIntervalMs: 30_000, now: () => now });
+    const exec = async () => { calls += 1; return { v: calls }; };
+    const a = await svc.run('k1', exec);
+    assert.strictEqual(a.cached, false);
+    assert.strictEqual(calls, 1);
+    now += 1000;
+    const b = await svc.run('k1', exec);
+    assert.strictEqual(b.cached, true, '同参数冷却内应回缓存');
+    assert.strictEqual(calls, 1, '缓存命中不应再执行');
+    now += 1000;
+    await assert.rejects(() => svc.run('k2', exec), (e) => e.code === 'RATE_LIMIT', '异参数冷却内应拒绝');
+    assert.strictEqual(calls, 1);
+    now += 29_000;
+    const c = await svc.run('k2', exec);
+    assert.strictEqual(c.cached, false, '冷却结束后应真实执行');
+    assert.strictEqual(calls, 2);
+    // BUSY：执行中不允许并发（先推进时钟越过冷却，否则 run('k3') 先被限流拦截）
+    now += 30_000;
+    let release;
+    const slow = new Promise((r) => { release = r; });
+    const p = svc.run('k3', () => slow);
+    await assert.rejects(() => svc.run('k4', exec), (e) => e.code === 'BUSY');
+    release();
+    await p;
+    // penalty
+    svc.penalty(60);
+    await assert.rejects(() => svc.run('k5', exec), (e) => e.code === 'RATE_LIMIT');
+    // 环境变量不可把间隔调到 30 秒以下
+    process.env.TRANSFER_MIN_INTERVAL_SECONDS = '5';
+    try {
+      const svc2 = new transfer.TransferService({ now: () => now });
+      assert.strictEqual(svc2.minIntervalMs, 30_000, '30 秒是硬下限');
+    } finally { delete process.env.TRANSFER_MIN_INTERVAL_SECONDS; }
+    // 可调大
+    const svc3 = new transfer.TransferService({ minIntervalMs: 60_000, now: () => now });
+    assert.strictEqual(svc3.minIntervalMs, 60_000);
+  });
+
+  await test('monitor.runExclusive 与 runOnce 共用串行闸门', async () => {
+    const config = { settings: { ...store.DEFAULT_CONFIG.settings }, watches: [], channels: [] };
+    const monitor = new Monitor({ getConfig: () => config });
+    monitor.stations = [];
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const original = client.queryTickets;
+    client.queryTickets = async () => { await gate; return { trains: [], stationMap: {}, checkedAt: Date.now() }; };
+    try {
+      const polling = monitor.runOnce([{ id: 'w1', from: 'a', to: 'b', date: '2026-10-20', seats: [], enabled: true }], { source: 'schedule' });
+      let transferRan = false;
+      const p = monitor.runExclusive(async () => { transferRan = true; return 1; }, { source: 'transfer' });
+      await new Promise((r) => setTimeout(r, 150));
+      // runOnce 在飞时 runExclusive 应排队等待（未执行）
+      await new Promise((r) => setTimeout(r, 150));
+      release();
+      await polling;
+      await p;
+      assert.strictEqual(transferRan, true);
+      assert.strictEqual(monitor.inFlight, false, '结束后应释放闸门');
+    } finally { client.queryTickets = original; }
+  });
+
+  await test('前端中转页静态检查', () => {
+    const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const js = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+    const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+    assert.ok(html.includes('data-tab="transfer"'), '应有中转方案 tab');
+    assert.ok(html.includes('id="tab-transfer"'), '应有中转方案 section');
+    assert.ok(html.includes('transferMiddle'), '应有换乘站输入');
+    assert.ok(html.includes('transferMinWait') && html.includes('transferMaxWait'), '换乘窗口应可调');
+    assert.ok(js.includes("'transfer'"), 'tab 数组应含 transfer');
+    assert.ok(js.includes('/api/transfer/query'), '应调用中转接口');
+    assert.ok(js.includes('startTransferCountdown'), '应有冷却倒计时');
+    assert.ok(serverSrc.includes('api\\/transfer\\/query') && serverSrc.includes('TransferService'), '服务端应有中转路由与节流');
+    assert.ok(!serverSrc.includes('transfer.findTransfers(query) && setInterval'), '中转不应进轮询');
+  });
+
   console.log('\n========== 结果 ==========');
   const failed = results.filter((r) => !r.ok);
   console.log(`通过 ${results.length - failed.length}/${results.length}`);
